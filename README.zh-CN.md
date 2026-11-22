@@ -356,6 +356,8 @@ if int(label) != COCO_DOG_LABEL or score < self.threshold:
 | 报错 / 症状 | 根因 | 修法 |
 |---|---|---|
 | `remoteproc: bad phdr da 0xa3ffec00` / `Failed to load program segments: -22` | 跑的是原版 DTB，没有 `vision-apps` carveout（`fdtfile` 被 boot 脚本忽略） | 3.2：直接 `cp` 覆盖 `k3-am67a-beagley-ai.dtb` |
+| `Booting fw image ...` 紧接 `Boot failed: -22`，**没有任何其它日志** | ELF 缺 `.resource_table` 段，`rproc_elf_load_rsc_table()` 静默返回 `-EINVAL` | 15.4②：补 16 字节空资源表；定位靠 `set_graph_function=rproc_boot` |
+| `remoteproc2` 永远 `offline`，`Direct firmware load ... failed with error -2` | 镜像里没有 `j722s-mcu-r5f0_0-fw` | 15.2：自己编一个放进去，或干脆不管 |
 | `/dev/dri` 只有 `card0`，`eglinfo` 没 PowerVR，**无报错** | EdgeAI 换内核后 DKMS 没重建 | 5.3：`dkms install ti-img-rogue-driver/<ver> -k $(uname -r) --force` |
 | `genirq: Flags mismatch irq N. (e5010) vs. (pinctrl)` → `-EBUSY` | DTB 里 `pinctrl@f4000` 抢了 GIC SPI 98 | 6.3：删三行中断属性 |
 | `Unable to init TIOVX module` | **三种完全不同的原因共用这一句**：2A 配置文件为 null / VPAC VISS 节点创建失败 / DMA 分配失败 | 开 `GST_DEBUG=3` 才看得到真相，见下 |
@@ -372,7 +374,7 @@ if int(label) != COCO_DOG_LABEL or score < self.threshold:
 | `onnxruntime ... GPU device discovery failed: /sys/class/drm/card1/device/vendor` | PowerVR 没有 `vendor` sysfs 节点 | 无害，忽略 |
 | `pkill -f 'while :'` 杀不掉满载进程 | `sh` 紧循环对 SIGTERM 不响应 | `pkill -9 -f`，或用带 `timeout` 的脚本 |
 | `validate-j722s-edgeai` 卡死 | gatekeeper 和自检抢 TIDL/TIOVX 锁 | `systemctl disable --now ti-edgeai-dachshund-gatekeeper` 后重启 |
-| `echo stop > .../remoteproc4/state` 报 `timedout waiting for rproc completion event` | vision_apps 固件不支持优雅停止 | 移走 `/lib/firmware/j722s-c71_*-fw` 符号链接后重启 |
+| `echo stop > .../remoteprocN/state` 卡 5 秒报 `timeout waiting for rproc completion event` / `can't stop rproc: -16` | 停核要靠 mailbox 握手，固件不支持优雅停止（`vision_apps` 固件、裸机固件都这样） | 只有 `reboot`。见 15.6 |
 
 ---
 
@@ -596,7 +598,213 @@ validate-j722s-edgeai              # 期望：PASS
 
 ---
 
-## 15. 一句话总结
+## 15. 片内 MCU（R5F）
+
+### 15.1 三个 R5F，能碰哪个
+
+| sysfs | 总线地址 | 核 | 用途 | 能碰吗 |
+|---|---|---|---|---|
+| `remoteproc2` | `79000000.r5f` | **MCU R5F0_0** | 空着，镜像里没给固件 | ✅ |
+| `remoteproc3` | `78000000.r5f` | WKUP R5F0_0 | Device Manager（TISCI） | ❌ `attached` |
+| `remoteproc4` | `78400000.r5f` | MAIN R5F0_0 | `vision_apps` 的 `mcu2_0` | ⚠️ TIDL 要用 |
+
+```sh
+for i in 0 1 2 3 4; do echo -n "remoteproc$i $(cat /sys/class/remoteproc/remoteproc$i/name): "; cat /sys/class/remoteproc/remoteproc$i/state; done
+# remoteproc0 7e000000.dsp: running      <- C7x-0（TIDL 检测）
+# remoteproc1 7e200000.dsp: running      <- C7x-1（TIDL 分类）
+# remoteproc2 79000000.r5f: offline      <- MCU R5F，没固件
+# remoteproc3 78000000.r5f: attached     <- DM 固件，别动
+# remoteproc4 78400000.r5f: running      <- vision_apps
+```
+
+### 15.2 为什么它一直 offline
+
+```sh
+cat /sys/class/remoteproc/remoteproc2/firmware    # j722s-mcu-r5f0_0-fw
+ls /lib/firmware/j722s-mcu-r5f0_0-fw               # No such file
+```
+
+```
+[ 6.167951] remoteproc remoteproc2: 79000000.r5f is available
+[ 6.168207] remoteproc remoteproc2: Direct firmware load for j722s-mcu-r5f0_0-fw failed with error -2
+```
+
+不是配置错。TI 的 PSDK 镜像只给了两个 C7x 和 MAIN R5F 的固件，MCU R5F 的留给你自己编。
+**只要 `/lib/firmware/j722s-mcu-r5f0_0-fw` 存在，开机就会 autoboot**，不用改 DT、不用加 service。
+
+### 15.3 它能干什么 —— 以及这块板上的硬限制
+
+Cortex-R5F @ 400MHz，32 KiB ATCM + 32 KiB BTCM，有 MPU 无 MMU，TCM 带 ECC，DDR 侧分到
+1 MiB（`@a1000000`）+ 15 MiB（`@a1100000`）。卖点是**确定性**：不受 Linux 调度和缺页影响，
+Linux 崩了它照跑。
+
+但 BeagleY-AI 上 MCU 域的外设**没引出来**：
+
+| 外设 | 地址 | DT 状态 | 40pin 排针 |
+|---|---|---|---|
+| MCU_I2C0 | `0x04900000` | **okay**，Linux 已占（100kHz） | 有（`hat/mcu_i2c0`） |
+| MCU_GPIO0 | `0x04201000` | **okay**，Linux `gpiochip515`，24 线 | — |
+| MCU_UART0 | `0x04a00000` | disabled | ❌ 无 pinmux |
+| MCU_SPI0 / SPI1 | `0x04b00000` / `0x04b10000` | disabled | ❌ 无 pinmux |
+| MCU_MCAN0 / MCAN1 | `0x04e08000` / `0x04e18000` | disabled | ❌ 无 pinmux |
+
+它们在 Linux 里是 `disabled`（名义上归 R5F 用），但板级 DTS 里**完全没有**给 MCU
+UART/SPI/MCAN 定义 pinctrl 组，引脚也没走到排针。全板 MCU 域引到 40pin 的只有 MCU_I2C0，
+而它归 Linux。
+
+所以：**想让 R5F 驱动物理 I/O 得飞线到测试点**。不飞线的话它就只是"一个能读写 DDR 的
+400MHz 附加核"，动手前先想清楚值不值。
+
+### 15.4 自己写裸机固件（不装 TI SDK）
+
+难点全在三个约定上。
+
+**① 代码放哪：BTCM 在 R5F 视角的 `0x0`**
+
+DT 里是 `ti,atcm-enable = 0` / `ti,btcm-enable = 1` / `ti,loczrama = 0`，驱动
+（`ti_k3_r5_remoteproc.c`）这样映射：
+
+```c
+if (!strcmp(data->mems[i].name, "atcm"))
+        kproc->mem[i].dev_addr = core->loczrama ? 0 : K3_R5_TCM_DEV_ADDR;   /* 0x41010000 */
+else
+        kproc->mem[i].dev_addr = core->loczrama ? K3_R5_TCM_DEV_ADDR : 0;
+```
+
+`loczrama = 0` → **BTCM 在地址 `0x0`**（总线地址 `0x79020000`）。启动向量取自 ELF 的
+entry point，所以**向量表必须放 `0x0`、entry 也必须是 `0x0`**。
+
+注意别被带偏：MAIN R5F（`78400000`）是 `loczrama = 1`，ATCM 在 `0x0`，TI 官方
+`vx_app_rtos_linux_mcu2_0.out` 的 entry 也是 `0x0` —— 同一个数字，不同的存储器。
+
+**② ELF 里必须有 `.resource_table` 段**
+
+这条最坑：这个内核的 `rproc_elf_load_rsc_table()` 找不到该段就返回 `-EINVAL`，
+而且**一行日志都不打**：
+
+```
+remoteproc remoteproc2: Booting fw image j722s-mcu-r5f0_0-fw, size 6952
+remoteproc remoteproc2: Boot failed: -22
+```
+
+完全没有线索，只能上 ftrace：
+
+```sh
+echo rproc_boot > /sys/kernel/tracing/set_graph_function
+echo 2 > /sys/kernel/tracing/max_graph_depth
+echo function_graph > /sys/kernel/tracing/current_tracer
+echo start > /sys/class/remoteproc/remoteproc2/state
+grep -v 'printk\|console\|prb_\|nbcon' /sys/kernel/tracing/trace | tail -30
+```
+
+```
+k3_r5_rproc_prepare()          |   811.675 us
+rproc_elf_get_boot_addr()      |     1.870 us
+rproc_elf_load_rsc_table()     |     3.315 us   <- 就是它返回 -22
+k3_r5_rproc_unprepare()        |   948.800 us   <- 回滚
+```
+
+补个 16 字节空表就过：
+
+```c
+struct resource_table { uint32_t ver, num, reserved[2]; } __attribute__((packed));
+__attribute__((section(".resource_table"), used))
+static const struct resource_table rsc_tbl = { .ver = 1, .num = 0 };
+```
+
+`num = 0` 表示不注册任何 virtio/rpmsg 设备，正好适合独立固件。
+
+**③ 状态：ARM 模式、cache 关**
+
+`k3_r5_rproc_configure()` 会清掉 `PROC_BOOT_CFG_FLAG_R5_TEINIT`（"always enable ARM
+mode"），核释放出来是 ARM 状态（不是 Thumb），cache 也没开。所以编译加 `-marm`，
+入口用 `.arm` 汇编，直接按物理地址访问 DDR——cache 没开反而是好事，写出去就是总线上
+真实的事务。
+
+完整可编译版本在 [`mcu-r5f/`](mcu-r5f/)，184 字节，纯 `arm-none-eabi-gcc`，无 SDK 无 libc：
+
+```sh
+sudo apt install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi
+cd mcu-r5f && make
+sudo cp r5fw.elf /lib/firmware/j722s-mcu-r5f0_0-fw
+sudo sh -c 'echo start > /sys/class/remoteproc/remoteproc2/state'
+dmesg | tail -3        # remoteproc remoteproc2: remote processor 79000000.r5f is now up
+```
+
+> 在 PC 或 WSL 上编，别在板子上编。184 字节的东西 A53 也编得动，但一上 MCU+ SDK
+> 就是几万个文件。
+
+固件做的事：往 DDR `0xa1100000`（DT 分给它的那个 carveout）写心跳和握手字。
+
+### 15.5 验证 A53 ↔ R5F 双向通
+
+`no-map` 的 carveout 不在内核线性映射里，`/dev/mem` 可以直接 mmap：
+
+```python
+import mmap, os, struct
+f = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0xa1100000)
+print(struct.unpack("<5I", m[:20]))          # (0xc0de, 心跳, cmd, echo, stat)
+m[8:12] = struct.pack("<I", 0x12345678)      # 写 cmd
+# 读回 echo 应为 ~0x12345678 = 0xedcba987
+```
+
+实测：
+
+```
+MAGIC=0x0000c0de HEART=97178 CMD=0x00000000 ECHO=0xffffffff STAT=0x1
+MAGIC=0x0000c0de HEART=124690 CMD=0x00000000 ECHO=0xffffffff STAT=0x1   <- 心跳在涨
+wrote CMD=0x12345678  ->  ECHO=0xedcba987  (expect 0xedcba987)  MATCH
+wrote CMD=0xdeadbeef  ->  ECHO=0x21524110  (expect 0x21524110)  MATCH
+heartbeat: 408290 -> 423585 in 1.000s = 15289 iters/s
+```
+
+15,289 次/秒 × 每轮 7 条指令的延时循环 ≈ 65µs 一轮，按 400MHz 算约 26k 周期/轮，
+与 R5F 标称频率自洽。（MCU 域时钟树归 DM 固件管，Linux `clk_summary` 里看不到 R5F
+的时钟，拿不到更硬的数。）
+
+### 15.6 ⚠️ 最大的坑：自己写的固件 `stop` 不掉
+
+```sh
+echo stop > /sys/class/remoteproc/remoteproc2/state
+# 卡 5.1 秒，然后：
+# platform 79000000.r5f: k3_r5_rproc_stop: timeout waiting for rproc completion event
+# remoteproc remoteproc2: can't stop rproc: -16
+# state 仍然是 running
+```
+
+TI 的 K3 remoteproc 停核不是拉 reset，而是**通过 mailbox 通知固件"该退了"，再等固件
+回应答**。裸机固件没这个握手，于是等满 5 秒超时、返回 `-EBUSY`。§9 里 `remoteproc4`
+那条 `timedout waiting for rproc completion event` 是同一个根因。
+
+后果：**只能重启板子才能复位这个核、换新固件**。反复 `stop` 没用，引用计数归零也没用。
+
+### 15.7 想要能正常 stop/restart，就用 TI 的 IPC 栈
+
+正规路线是 MCU+ SDK 的 `ipc_rpmsg_echo_linux`，自带 mailbox 握手、virtio 通道和真正的
+资源表：
+
+1. 下 `mcu_plus_sdk_am67a`（TI 官网，要账号，1.5–2GB）
+2. `examples/drivers/ipc/ipc_rpmsg_echo_linux/am67a-evm/r5fss0-0_freertos/`
+   （MCU 域选 `mcu-r5fss0-0`）
+3. 交叉编译 → `ipc_rpmsg_echo_linux_r5fss0-0_freertos_ti-arm-clang.out`
+4. 改名成 `j722s-mcu-r5f0_0-fw` 装进去
+5. Linux 侧用 `ti-rpmsg-char`（`/dev/rpmsg_ctrlN` → `/dev/rpmsgN`）收发
+
+板子上 `rpmsg_ctrl0..3`、`rpmsg0..6` 这些节点本来就有，是留给 C7x/R5F 的 virtio 端点。
+走这条路才有：优雅停止、固件端 `printf` 回传、`/dev/rpmsgN` 字符设备。
+
+### 15.8 想恢复干净
+
+```sh
+rm -f /lib/firmware/j722s-mcu-r5f0_0-fw
+reboot
+# remoteproc2 回到 offline，和出厂一致
+```
+
+---
+
+## 16. 一句话总结
 
 这块板子的问题几乎全在**"装完不报错但功能没有"**这一类：DTB 选错、DKMS 没重建、中断冲突、OPP 表缺失、AE 把画面压黑、检测器只认狗。
 所以排查的顺序永远是：**先看 `dmesg` 和 `GST_DEBUG=3` 的真实错误，不要相信上层那句 "Unable to init TIOVX module"。**

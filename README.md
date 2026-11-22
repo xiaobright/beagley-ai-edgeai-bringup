@@ -399,6 +399,9 @@ successfully and then emits zero frames** (§9). So the options are:
 | Error / symptom | Root cause | Fix |
 |---|---|---|
 | `remoteproc: bad phdr da 0xa3ffec00` / `Failed to load program segments: -22` | base DTB loaded, no `vision-apps` carveouts (`fdtfile` ignored by the boot script) | §3.2 — `cp` over `k3-am67a-beagley-ai.dtb` |
+| `Booting fw image ...` then `Boot failed: -22`, **no other log line** | ELF has no `.resource_table`; `rproc_elf_load_rsc_table()` returns `-EINVAL` silently | §15.4② — add the 16-byte empty table; locate it with `set_graph_function=rproc_boot` |
+| `remoteproc2` stays `offline`, `Direct firmware load ... failed with error -2` | no `j722s-mcu-r5f0_0-fw` in the image | §15.2 — build one, or ignore it |
+| `echo stop` returns 0 but the state does not change and dmesg stays empty | `rproc->power` refcount is > 1 | `stop` once more; if it still holds, see the row below |
 | `/dev/dri` has only `card0`, no PowerVR in `eglinfo`, **no error** | DKMS module not rebuilt for the new kernel | §5.3 — `dkms install ... -k $(uname -r) --force` |
 | `genirq: Flags mismatch irq N. (e5010) vs. (pinctrl)` → `-EBUSY` | `pinctrl@f4000` claims GIC SPI 98 | §6.3 — delete three properties |
 | `Unable to init TIOVX module` | **three unrelated causes share this one string**: 2A config path is NULL / VPAC VISS node creation failed / DMA allocation failed | run with `GST_DEBUG=3` to see the real one |
@@ -415,7 +418,7 @@ successfully and then emits zero frames** (§9). So the options are:
 | `onnxruntime ... GPU device discovery failed: /sys/class/drm/card1/device/vendor` | PowerVR exposes no `vendor` sysfs attribute | harmless, ignore |
 | `pkill -f 'while :'` does not stop load generators | `sh` in a tight loop defers SIGTERM | `pkill -9 -f`, or use a script with `timeout` |
 | `validate-j722s-edgeai` hangs | gatekeeper and the self-test fight over the TIDL/TIOVX lock | `systemctl disable --now ti-edgeai-dachshund-gatekeeper`, then reboot |
-| `echo stop > .../remoteproc4/state` → `timedout waiting for rproc completion event` | vision_apps firmware has no graceful stop | move `/lib/firmware/j722s-c71_*-fw` symlinks away, then reboot |
+| `echo stop > .../remoteprocN/state` hangs 5 s → `timeout waiting for rproc completion event` / `can't stop rproc: -16` | stopping needs a mailbox handshake the firmware does not implement (`vision_apps` and bare-metal firmware alike) | only `reboot`. §15.6 |
 
 ---
 
@@ -625,6 +628,7 @@ reboot
 # 1. C7x / R5F firmware
 for i in 0 1 2 3 4; do echo -n "remoteproc$i: "; cat /sys/class/remoteproc/remoteproc$i/state; done
 #    expect: running / running / offline / attached / running
+#    with a self-built MCU firmware: running / running / running / attached / running
 
 # 2. GPU
 ls /dev/dri/                       # expect: card0 card1 renderD128
@@ -658,7 +662,232 @@ Configuration will not help here:
 
 ---
 
-## 15. One-line summary
+## 15. The on-chip MCU (R5F)
+
+### 14.1 Three R5Fs, and which one you may touch
+
+| sysfs | bus address | core | role | safe to use |
+|---|---|---|---|---|
+| `remoteproc2` | `79000000.r5f` | **MCU R5F0_0** | free, no firmware shipped | ✅ |
+| `remoteproc3` | `78000000.r5f` | WKUP R5F0_0 | Device Manager (TISCI) | ❌ `attached` |
+| `remoteproc4` | `78400000.r5f` | MAIN R5F0_0 | `vision_apps` `mcu2_0` | ⚠️ TIDL needs it |
+
+```sh
+for i in 0 1 2 3 4; do echo -n "remoteproc$i $(cat /sys/class/remoteproc/remoteproc$i/name): "; cat /sys/class/remoteproc/remoteproc$i/state; done
+# remoteproc0 7e000000.dsp: running      <- C7x-0 (TIDL detect)
+# remoteproc1 7e200000.dsp: running      <- C7x-1 (TIDL classify)
+# remoteproc2 79000000.r5f: offline      <- MCU R5F, no firmware in the image
+# remoteproc3 78000000.r5f: attached     <- DM firmware, never touch
+# remoteproc4 78400000.r5f: running      <- vision_apps
+```
+
+### 14.2 Why it is always `offline`
+
+```sh
+cat /sys/class/remoteproc/remoteproc2/firmware    # j722s-mcu-r5f0_0-fw
+ls /lib/firmware/j722s-mcu-r5f0_0-fw               # No such file
+```
+
+```
+[ 6.167951] remoteproc remoteproc2: 79000000.r5f is available
+[ 6.168207] remoteproc remoteproc2: Direct firmware load for j722s-mcu-r5f0_0-fw failed with error -2
+```
+
+Nothing is misconfigured. The TI PSDK image simply only ships firmware for the
+two C7x and the MAIN R5F; the MCU R5F one is yours to write. **As soon as
+`/lib/firmware/j722s-mcu-r5f0_0-fw` exists, remoteproc autoboots it on every
+boot** — no service, no DT change.
+
+### 14.3 What it can do — and the hard limit on this board
+
+Cortex-R5F @ 400 MHz, 32 KiB ATCM + 32 KiB BTCM, MPU (no MMU), ECC on TCM,
+plus 1 MiB (`@a1000000`) + 15 MiB (`@a1100000`) of DDR carveout. Its selling
+point is determinism: unaffected by Linux scheduling or page faults, keeps
+running if Linux dies.
+
+The catch on BeagleY-AI is that **the MCU-domain peripherals are not broken
+out**:
+
+| peripheral | address | DT status | 40-pin header |
+|---|---|---|---|
+| MCU_I2C0 | `0x04900000` | **okay**, already owned by Linux (100 kHz) | yes (`hat/mcu_i2c0`) |
+| MCU_GPIO0 | `0x04201000` | **okay**, Linux `gpiochip515`, 24 lines | — |
+| MCU_UART0 | `0x04a00000` | disabled | ❌ no pinmux |
+| MCU_SPI0 / SPI1 | `0x04b00000` / `0x04b10000` | disabled | ❌ no pinmux |
+| MCU_MCAN0 / MCAN1 | `0x04e08000` / `0x04e18000` | disabled | ❌ no pinmux |
+
+They are `disabled` in Linux (so nominally free for the R5F), but the board DTS
+defines **no pinctrl group at all** for MCU UART/SPI/MCAN, and none of those pins
+reach the header. The only MCU-domain function on the 40-pin header is MCU_I2C0,
+and Linux owns it.
+
+So: driving real I/O from the R5F requires soldering to test points. Without
+that it is just "an extra 400 MHz core that can read and write DDR" — decide
+whether that is worth your time before starting.
+
+### 14.4 Running your own bare-metal firmware (no TI SDK)
+
+All the difficulty is in three conventions.
+
+**① Where the code goes: BTCM sits at R5F address `0x0`**
+
+The DT node has `ti,atcm-enable = 0`, `ti,btcm-enable = 1`, `ti,loczrama = 0`,
+and `ti_k3_r5_remoteproc.c` maps it as:
+
+```c
+if (!strcmp(data->mems[i].name, "atcm"))
+        kproc->mem[i].dev_addr = core->loczrama ? 0 : K3_R5_TCM_DEV_ADDR;   /* 0x41010000 */
+else
+        kproc->mem[i].dev_addr = core->loczrama ? K3_R5_TCM_DEV_ADDR : 0;
+```
+
+`loczrama = 0` → **BTCM is at address `0x0`** (bus address `0x79020000`). The
+boot vector comes from the ELF entry point, so **the vector table must be at
+`0x0` and entry must be `0x0`**.
+
+Careful: MAIN R5F (`78400000`) has `loczrama = 1`, so its ATCM is at `0x0` and
+TI's `vx_app_rtos_linux_mcu2_0.out` also has entry `0x0` — same number,
+different memory. That similarity misleads people.
+
+**② The ELF must contain a `.resource_table` section**
+
+This one hurts: on this kernel `rproc_elf_load_rsc_table()` returns `-EINVAL`
+when the section is missing, **and logs nothing at all**:
+
+```
+remoteproc remoteproc2: Booting fw image j722s-mcu-r5f0_0-fw, size 6952
+remoteproc remoteproc2: Boot failed: -22
+```
+
+No hint whatsoever. ftrace is the only way in:
+
+```sh
+echo rproc_boot > /sys/kernel/tracing/set_graph_function
+echo 2 > /sys/kernel/tracing/max_graph_depth
+echo function_graph > /sys/kernel/tracing/current_tracer
+echo start > /sys/class/remoteproc/remoteproc2/state
+grep -v 'printk\|console\|prb_\|nbcon' /sys/kernel/tracing/trace | tail -30
+```
+
+```
+k3_r5_rproc_prepare()          |   811.675 us
+rproc_elf_get_boot_addr()      |     1.870 us
+rproc_elf_load_rsc_table()     |     3.315 us   <- returns -22
+k3_r5_rproc_unprepare()        |   948.800 us   <- rollback
+```
+
+A 16-byte empty table fixes it:
+
+```c
+struct resource_table { uint32_t ver, num, reserved[2]; } __attribute__((packed));
+__attribute__((section(".resource_table"), used))
+static const struct resource_table rsc_tbl = { .ver = 1, .num = 0 };
+```
+
+`num = 0` registers no virtio/rpmsg device, which is what a standalone firmware
+wants.
+
+**③ ARM state, caches off**
+
+`k3_r5_rproc_configure()` clears `PROC_BOOT_CFG_FLAG_R5_TEINIT` ("always enable
+ARM mode"), so the core comes out of reset in ARM state (not Thumb) with caches
+off. Compile with `-marm`, write the entry stub in `.arm` assembly, and touch
+DDR by physical address — caches being off is a feature here, every store is a
+real bus transaction.
+
+The complete buildable version is in [`mcu-r5f/`](mcu-r5f/) — 184 bytes, plain
+`arm-none-eabi-gcc`, no SDK, no libc:
+
+```sh
+sudo apt install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi
+cd mcu-r5f && make
+sudo cp r5fw.elf /lib/firmware/j722s-mcu-r5f0_0-fw
+sudo sh -c 'echo start > /sys/class/remoteproc/remoteproc2/state'
+dmesg | tail -3        # remoteproc remoteproc2: remote processor 79000000.r5f is now up
+```
+
+> Build it on a PC or in WSL, not on the board. 184 bytes compile instantly on
+> an A53, but the moment the MCU+ SDK is involved you are looking at tens of
+> thousands of files.
+
+The firmware writes a heartbeat and a handshake word into DDR `0xa1100000` (the
+carveout the DT hands to it).
+
+### 14.5 Verifying A53 ↔ R5F in both directions
+
+`no-map` carveouts are outside the kernel linear map, so `/dev/mem` can mmap
+them directly:
+
+```python
+import mmap, os, struct
+f = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0xa1100000)
+print(struct.unpack("<5I", m[:20]))          # (0xc0de, heartbeat, cmd, echo, stat)
+m[8:12] = struct.pack("<I", 0x12345678)      # write cmd
+# reading echo back should give ~0x12345678 = 0xedcba987
+```
+
+Measured:
+
+```
+MAGIC=0x0000c0de HEART=97178 CMD=0x00000000 ECHO=0xffffffff STAT=0x1
+MAGIC=0x0000c0de HEART=124690 CMD=0x00000000 ECHO=0xffffffff STAT=0x1   <- counting up
+wrote CMD=0x12345678  ->  ECHO=0xedcba987  (expect 0xedcba987)  MATCH
+wrote CMD=0xdeadbeef  ->  ECHO=0x21524110  (expect 0x21524110)  MATCH
+heartbeat: 408290 -> 423585 in 1.000s = 15289 iters/s
+```
+
+15,289 iterations/s × a 7-instruction delay loop ≈ 65 µs per iteration, about
+26k cycles at 400 MHz — consistent with the R5F's rated clock. (The MCU domain
+clock tree belongs to the DM firmware and never appears in Linux
+`clk_summary`, so there is no harder number to be had.)
+
+### 14.6 ⚠️ The big trap: your own firmware cannot be stopped
+
+```sh
+echo stop > /sys/class/remoteproc/remoteproc2/state
+# hangs 5.1 s, then:
+# platform 79000000.r5f: k3_r5_rproc_stop: timeout waiting for rproc completion event
+# remoteproc remoteproc2: can't stop rproc: -16
+# state is still "running"
+```
+
+TI's K3 remoteproc does not stop a core by asserting reset — it **pings the
+firmware over the mailbox and waits for an acknowledgement**. A bare-metal
+firmware implements no such handshake, so it waits out the 5-second timeout and
+returns `-EBUSY`. The `remoteproc4` row in §9 has exactly the same root cause.
+
+Consequence: **the only way to reset that core or load new firmware is a
+reboot.** Repeating `stop` does not help, and having the refcount at zero makes
+no difference.
+
+### 14.7 If you need stop/restart, use TI's IPC stack
+
+The supported path is MCU+ SDK's `ipc_rpmsg_echo_linux`, which brings the
+mailbox handshake, virtio channels and a real resource table:
+
+1. Download `mcu_plus_sdk_am67a` (TI website, account required, 1.5–2 GB)
+2. `examples/drivers/ipc/ipc_rpmsg_echo_linux/am67a-evm/r5fss0-0_freertos/`
+   (pick `mcu-r5fss0-0` for the MCU domain)
+3. Cross-compile → `ipc_rpmsg_echo_linux_r5fss0-0_freertos_ti-arm-clang.out`
+4. Rename to `j722s-mcu-r5f0_0-fw` and install it
+5. On Linux use `ti-rpmsg-char` (`/dev/rpmsg_ctrlN` → `/dev/rpmsgN`)
+
+`rpmsg_ctrl0..3` and `rpmsg0..6` already exist on the board — they are the
+virtio endpoints reserved for C7x/R5F. Only that path gives you graceful stop,
+firmware-side `printf` forwarding and `/dev/rpmsgN` character devices.
+
+### 14.8 Back to stock
+
+```sh
+rm -f /lib/firmware/j722s-mcu-r5f0_0-fw
+reboot
+# remoteproc2 returns to offline, factory state
+```
+
+---
+
+## 16. One-line summary
 
 Almost every problem on this board is of the form **"it installs cleanly, then
 silently does nothing"**: wrong DTB, missing DKMS rebuild, IRQ conflict, missing
