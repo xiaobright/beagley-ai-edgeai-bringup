@@ -2,18 +2,19 @@
 
 **中文版: [README.zh-CN.md](README.zh-CN.md)**
 
-A practical, hardware-verified guide to running the full TI EdgeAI hardware stack on a **4 GB BeagleY-AI** on top of standard Ubuntu `apt` (Armbian Noble) — **without** having to build a Yocto image or rebuild the whole Linux kernel.
+A practical, hardware-verified guide to running the full TI EdgeAI hardware stack on a **4 GB BeagleY-AI** on top of standard Ubuntu `apt` (Armbian Noble) — with prebuilt binaries including a full enhanced kernel (`v1.2.0`) enabling onboard Wi-Fi 6 + BLE 5.4 and common peripheral/industrial drivers alongside the TI EdgeAI stack.
 
 - **Board**: BeagleY-AI (TI AM67A / J722S, 4 GB LPDDR4) + IMX219 on CSI0
-- **OS**: Armbian 26.08 (Ubuntu 24.04 Noble minimal), kernel `6.12.49-vendor-k3-beagle`
+- **OS**: Armbian 26.08 (Ubuntu 24.04 Noble minimal), enhanced kernel `6.12.49-vendor-k3-beagle`
 - **AI Stack**: TI EdgeAI PSDK 11.02.01.03 (`ti-edgeai` `v11.2.1-beagley.1` debs)
 - **Tested**: 2026-11-22 (every command and benchmark below was measured on real hardware)
 
 > **Want prebuilt binaries so you don't have to compile anything?**
-> Download the ready-to-use files from [GitHub Release `v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0):
-> 1. `k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb` — Golden DTB with 4 GB EdgeAI carveouts, CSI0 IMX219, e5010 IRQ fix, 1.4 GHz CPU OPP table, and 80 °C passive thermal throttling
-> 2. `cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz` — Prebuilt onboard Wi-Fi 6 kernel modules + `install.sh`
+> Download the ready-to-use files from [GitHub Release `v1.2.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.2.0):
+> 1. `kernel-6.12.49-vendor-k3-beagle-full.tar.gz` — Full upgraded kernel + modules (Wi-Fi 6, BLE 5.4, `btti_uart`, USB UASP/serial/audio/RNDIS, `uinput`, SocketCAN, GPIO PPS, WireGuard, exFAT/NTFS3) **plus pre-rebuilt PowerVR GPU `pvrsrvkm.ko`** and header sync files; installs via [`scripts/install-kernel.sh`](scripts/install-kernel.sh) with automatic `.orig` rollback backups
+> 2. `k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb` — Golden DTB with 4 GB EdgeAI carveouts, CSI0 IMX219, e5010 IRQ fix, 1.4 GHz CPU OPP table, and 80 °C passive thermal throttling
 > 3. `r5fw.elf` — Minimal bare-metal Cortex-R5F test firmware (Appendix)
+> 4. `SHA256SUMS` — Release checksums *(Wi-Fi-only out-of-tree `.ko` archive for the stock kernel remains available in [`v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0))*
 >
 > Follow **Sections 1 → 9** in order for a clean setup, or jump straight to **Section 10 (Error Lookup Table)** if you hit an error.
 
@@ -24,12 +25,13 @@ A practical, hardware-verified guide to running the full TI EdgeAI hardware stac
 | Capability | Status | Measured Result |
 |---|---|---|
 | Onboard Wi-Fi 6 (TI CC3300) | ✅ Working | 2.4 GHz Wi-Fi 6 (`HE-MCS 7`), 86.0 MBit/s RX PHY rate, auto-connect on boot |
-| Onboard Bluetooth (CC3300 BLE) | ❌ Not active | `btti_uart.ko` builds & loads, but kernel disables `CONFIG_BT_LE` & `CONFIG_CFG80211_DEBUGFS` (§5.5) |
+| Onboard Bluetooth (CC3300 BLE 5.4) | ✅ Working | TI BLE 5.4 (`version 13` / `hci0`), auto-enabled at boot via `cc33xx-ble-enable.service`, scans LE devices and coexists cleanly with Wi-Fi 6 |
+| USB / CAN / Storage / VPN Modules | ✅ Added | Built modularly: `uas`, `ch341`, `pl2303`, `snd-usb-audio`, `rndis_host`, `uinput`, `gs_usb`, `slcan`, `peak_usb`, `mcp251x`, `pps-gpio`, `wireguard`, `exfat`, `ntfs3` (`KVM` kept OFF) |
 | CPU DVFS + Thermal Throttling | ✅ Fixed | 7 steps (200 MHz – 1.4 GHz); 80 °C passive throttling bound in all 3 thermal zones; 60 s load @ 54.8 °C |
-| GPU (PowerVR BXS-4-64) | ✅ Working | OpenGL ES 3.2 via `/dev/dri/card1` + `renderD128` (requires DKMS rebuild, §6) |
+| GPU (PowerVR BXS-4-64) | ✅ Working | OpenGL ES 3.2 via `/dev/dri/card1` + `renderD128` (bundled in `v1.2.0` kernel tarball; manual DKMS notes in §6) |
 | JPEG Encoder (e5010) | ✅ Working | ~**39.7 fps** @ 1080p (after fixing the DTB IRQ collision) |
 | H.264 / HEVC Encode (wave5) | ✅ Working | H.264 **38.6 fps** @ 1080p / **79.3 fps** @ 720p; HEVC **39.6 fps** @ 1080p |
-| Dual C7x + TIDL Inference | ✅ Working | MobileNetV1 **4.62 ms** (34/34 ops), RegNetX **7.29 ms** (103/103 nodes), `cpu_fallback = 0` |
+| Dual C7x + TIDL Inference | ✅ Working | MobileNetV1 **4.67 ms** (34/34 ops), RegNetX **8.36 ms** (103/103 nodes), `cpu_fallback = 0` |
 | IMX219 + VPAC ISP | ✅ Working | **30.09 fps** @ 1080p; ISP → H.264 encode **29.7 fps** |
 | Power Draw (USB meter) | — | **5.4 W** idle, **6.1 W** (4 cores @ 1.4 GHz full load) |
 
@@ -98,7 +100,7 @@ Unlike typical Armbian boards, this boot chain runs `/boot/uEnv.txt` → `bootcm
 
 ```sh
 sudo mkdir -p /root/dtb-good
-sudo curl -fL "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.1.0/k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb" \
+sudo curl -fL "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.2.0/k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb" \
   -o /root/dtb-good/k3-am67a-beagley-ai.dtb.golden
 
 # Verify SHA256: 10227dd8aa5bebafdd39d4f36a73e4ea3c49b0d6ec2208499300936e740fdc54
@@ -140,45 +142,88 @@ ls -l /sys/class/thermal/thermal_zone0/cdev*
 
 ---
 
-## 5. Onboard Wi-Fi 6 (TI CC3300) & Bluetooth Status
+## 5. Onboard Wi-Fi 6 + BLE 5.4 Bluetooth (& Peripheral Drivers)
 
-### 5.1 Why Wi-Fi Doesn't Work Out of the Box
+### 5.1 What the Stock Kernel Misses
 
-The CC3300 SDIO device (`mmc2:0001:2`, `0x0097:0x4077`), DTB node (`ti,cc3300`), and firmware files (`/lib/firmware/ti-connectivity/cc33xx_*.bin`) are all present, **but Armbian left `# CONFIG_CC33XX is not set` in the kernel config**.
+The CC3300 SDIO Wi-Fi (`mmc2:0001:2`, `0x0097:0x4077`), UART Bluetooth (`serial0-0`), DTB nodes, and `/lib/firmware/ti-connectivity/cc33xx_*.bin` firmware are all present in hardware, but stock `6.12.49-vendor-k3-beagle` ships with:
+- `# CONFIG_CC33XX is not set` (no onboard Wi-Fi);
+- `# CONFIG_BT_LE is not set` (Classic BR/EDR only, whereas CC3300 only supports **BLE 5.4**) and `# CONFIG_CFG80211_DEBUGFS is not set` (hides `/sys/kernel/debug/ieee80211/phy0/cc33xx/ble_enable`, so the Bluetooth core never receives its wakeup frame);
+- Missing modular drivers for common USB/industrial/storage tasks (`uas`, `ch341`, `pl2303`, `snd-usb-audio`, `rndis_host`, `uinput`, `gs_usb`, `slcan`, `peak_usb`, `mcp251x`, `pps-gpio`, `wireguard`, `exfat`, `ntfs3`).
 
-Because `CONFIG_MODVERSIONS` and `CONFIG_MODULE_SIG` are both **disabled**, and the board has matching kernel headers + `Module.symvers` + the exact same `gcc 13.3.0`, you do **not** need to rebuild the whole kernel — compiling `cc33xx.ko` and `cc33xx_sdio.ko` out-of-tree works cleanly.
+Choose one of two paths:
+- **Option A (Full Solution, Recommended)**: Install the prebuilt **`v1.2.0` full kernel bundle** — keeps the exact `6.12.49-vendor-k3-beagle` release string and your golden EdgeAI DTB, includes the newly rebuilt PowerVR GPU `pvrsrvkm.ko`, turns on Wi-Fi 6 + BLE 5.4 + all peripheral modules above, and creates `.orig` rollback backups automatically.
+- **Option B (Wi-Fi Only, Keep Stock `/boot/Image`)**: Install or build only the out-of-tree `cc33xx.ko` / `cc33xx_sdio.ko` modules from [`v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0) (no onboard BLE).
 
-### 5.2 Option A (Recommended): Install Prebuilt Release Modules
+---
 
-For `6.12.49-vendor-k3-beagle`:
+### 5.2 Option A (Recommended): Install the Prebuilt `v1.2.0` Full Kernel Bundle
+
+> **To cross-compile from source yourself**: start from mainline `linux-6.12.49` + TI delta + `RobertCNelson/ti-linux-kernel-dev` tag `6.12.49-ti-arm64-r56` patches (`dwarves`/`pahole` and `zstd` required on the build host), keeping `LOCALVERSION="-vendor-k3-beagle"`.
+
+```sh
+TAG=v1.2.0
+BASE="https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/${TAG}"
+
+curl -fLO "${BASE}/kernel-6.12.49-vendor-k3-beagle-full.tar.gz"
+curl -fLO "${BASE}/SHA256SUMS"
+grep kernel-6.12.49-vendor-k3-beagle-full.tar.gz SHA256SUMS | sha256sum -c
+
+sudo bash scripts/install-kernel.sh kernel-6.12.49-vendor-k3-beagle-full.tar.gz
+sudo reboot
+```
+
+[`scripts/install-kernel.sh`](scripts/install-kernel.sh) preserves `/boot/dtb/ti/k3-am67a-beagley-ai.dtb` and `/boot/uEnv.txt` untouched, saves `.orig` rollback backups (`/boot/*.orig`, `/lib/modules/6.12.49-vendor-k3-beagle.orig`, `/root/headers-sync-orig.tar.gz`, `/root/boot-orig/`), installs the new kernel + modules + header sync files + rebuilt `pvrsrvkm.ko`, updates `uInitrd`, configures `/etc/modules-load.d/cc33xx.conf` (`cc33xx_sdio` + `btti_uart`), installs `bluez --no-install-recommends`, and enables `cc33xx-ble-enable.service`.
+
+After reboot, verify both Wi-Fi 6 and BLE 5.4:
+
+```sh
+# 1. Wi-Fi 6
+iw dev
+sudo ip link set wlan0 up
+sudo iw dev wlan0 scan | grep -E 'SSID:|signal:' | head -n 20
+
+# 2. Onboard TI BLE 5.4 controller (hci0, version 13, manufacturer 13)
+sudo btmgmt info
+# Expect: current settings: powered le secure-conn
+
+# 3. Real BLE scan (10 seconds)
+sudo timeout 10 btmgmt find -l
+```
+
+> **Two real-world CC3300 BLE quirks:**
+> 1. **`hciconfig -a` prints `Can't read local name on hci0: Input/output error (5)`**: CC3300 is BLE-only (no Classic BR/EDR), so BR/EDR `HCI_Read_Local_Name` always fails harmlessly. Use `btmgmt info`, `btmgmt find -l`, or `bluetoothctl`.
+> 2. **Never invoke `btmgmt` inside non-interactive `systemd` units**: BlueZ 5.72 `btmgmt` blocks indefinitely when `stdin` is `/dev/null`. [`scripts/cc33xx-ble-enable.sh`](scripts/cc33xx-ble-enable.sh) writes `1` to `cc33xx/ble_enable`, clears soft `rfkill` via sysfs, and brings up `hci0` with `hciconfig hci0 up < /dev/null`, letting `bluetoothd` (`AutoEnable=true`) power it cleanly.
+
+Rollback to stock kernel at any time:
+
+```sh
+sudo cp -f /boot/Image.orig /boot/Image
+sudo cp -f /boot/config-6.12.49-vendor-k3-beagle.orig /boot/config-6.12.49-vendor-k3-beagle
+sudo cp -f /boot/System.map-6.12.49-vendor-k3-beagle.orig /boot/System.map-6.12.49-vendor-k3-beagle
+sudo rm -rf /lib/modules/6.12.49-vendor-k3-beagle
+sudo mv /lib/modules/6.12.49-vendor-k3-beagle.orig /lib/modules/6.12.49-vendor-k3-beagle
+sudo cp -f /root/boot-orig/uInitrd /boot/uInitrd
+sudo systemctl disable --now cc33xx-ble-enable.service
+sync && sudo reboot
+```
+
+### 5.3 Option B (Wi-Fi Only, Stock Kernel): Out-of-Tree Modules
+
+If you prefer leaving `/boot/Image` untouched (Wi-Fi 6 only, no BLE):
 
 ```sh
 curl -fLO "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.1.0/cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz"
 tar -xzf cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz
 sudo sh install.sh
-
-iw dev
-sudo ip link set wlan0 up
-sudo iw dev wlan0 scan | grep -E 'SSID:|signal:' | head -n 20
 ```
 
-### 5.3 Option B: Build from Source Yourself
-
-> **Do NOT use mainline `kernel.org` `linux-6.12.49`!** Mainline 6.12 does not contain `cc33xx`.
-> The exact matching source is `https://github.com/beagleboard/linux`, branch **`v6.12.49-ti-arm64-r56`** (verified commit `8fb21420a704ea36aaf66df8288ed8ee9da2762d`, whose `Kconfig` and `Makefile` match `/lib/modules/6.12.49-vendor-k3-beagle/build/drivers/net/wireless/ti/cc33xx/` byte-for-byte).
->
-> Also copy all `.h` files from `net/mac80211/` into a sibling `../net/mac80211/` directory because `cc33xx/main.c` and `debugfs.c` use `#include "../net/mac80211/ieee80211_i.h"`.
-
-Once your directory has `src-drivers/cc33xx/` and `src-drivers/net/mac80211/*.h`, build natively on the board (~38 seconds):
+Or build `cc33xx.ko` + `cc33xx_sdio.ko` natively on the board (~38 seconds) using `drivers/net/wireless/ti/cc33xx/` + `net/mac80211/*.h` from `https://github.com/beagleboard/linux` branch `v6.12.49-ti-arm64-r56` (do **not** use mainline `kernel.org` 6.12, which lacks `cc33xx`):
 
 ```sh
 cd src-drivers/cc33xx
 make -j4 -C /lib/modules/$(uname -r)/build M="$PWD" \
   CONFIG_CC33XX=m CONFIG_CC33XX_SDIO=m modules
-
-modinfo cc33xx.ko cc33xx_sdio.ko | grep -E 'filename|vermagic|depends'
-# Must say: vermagic: 6.12.49-vendor-k3-beagle SMP preempt mod_unload aarch64
-
 sudo make -C /lib/modules/$(uname -r)/build M="$PWD" \
   CONFIG_CC33XX=m CONFIG_CC33XX_SDIO=m modules_install
 sudo depmod -a
@@ -216,21 +261,15 @@ Key notes:
 - Both `dhcp4-overrides` and `dhcp6-overrides` **must** specify the same `route-metric` (`200`), or `netplan apply` fails.
 - Metric `200` keeps wired `eth0` (metric `100`) as the default gateway so SSH over Ethernet never drops.
 - `optional: true` prevents boot delays when Wi-Fi is out of range.
-- CC3300 is 2.4 GHz 1×1 Wi-Fi 6 only (no 5 GHz); measured PHY link hit `HE-MCS 7` (86.0 MBit/s RX), real throughput ~20–40 Mbps.
-
-### 5.5 Onboard Bluetooth Status (`btti_uart.ko`)
-
-`btti_uart.ko` (from `drivers/bluetooth/btti_uart.c` + `h4_recv.h`) builds cleanly and is included in the Release tarball, **but `install.sh` intentionally does not auto-load it** because of two kernel config limits in `6.12.49-vendor-k3-beagle`:
-1. `cc33xx` only exposes its `BLE_ENABLE` firmware trigger via debugfs (`/sys/kernel/debug/ieee80211/phy0/cc33xx/ble_enable`), which is missing because `# CONFIG_CFG80211_DEBUGFS is not set`;
-2. The kernel has **`# CONFIG_BT_LE is not set`** (only Classic BR/EDR is compiled in), whereas CC3300/BM3301 only supports **BLE 5.4**.
-
-Unless you rebuild the full kernel with `CONFIG_BT_LE=y` and `CONFIG_CFG80211_DEBUGFS=y`, use a USB Bluetooth dongle if you need Bluetooth.
+- CC3300 is 2.4 GHz 1×1 Wi-Fi 6 only (no 5 GHz); measured PHY link hit `HE-MCS 7` (86.0 MBit/s RX), coexists with BLE 5.4 scanning, and delivers ~20–40 Mbps real throughput.
 
 ---
 
 ## 6. Restore the GPU (PowerVR BXS-4-64)
 
-Installing the EdgeAI kernel replaces the running kernel without rebuilding `ti-img-rogue-driver` via DKMS, so `/dev/dri` silently loses `card1` and `renderD128` with zero warnings. Rebuild it for the running kernel:
+> If you installed the `v1.2.0` kernel tarball from §5.2, the freshly rebuilt `pvrsrvkm.ko` is already included — skip straight to verifying `/dev/dri/card1` and `eglinfo`.
+
+After installing the EdgeAI `.deb` packages (or after rebuilding your own kernel), rebuild `ti-img-rogue-driver` via DKMS:
 
 ```sh
 VER=$(dkms status | grep ti-img-rogue-driver | head -1 | sed 's/.*ti-img-rogue-driver\/\([^,]*\),.*/\1/')
@@ -304,7 +343,7 @@ sudo systemctl disable --now ti-edgeai-dachshund-gatekeeper
 sudo validate-j722s-edgeai
 ```
 
-Must finish with `TI EDGEAI RUNTIME VALIDATION: PASS` (measured: ONNX `regnetx-200mf` 103/103 nodes in **7.29 ms**, TFLite `mobilenet_v1` 34/34 ops in **4.62 ms**, `cpu_ep_fallback=disabled`).
+Must finish with `TI EDGEAI RUNTIME VALIDATION: PASS` (re-measured on `v1.2.0` kernel: ONNX `regnetx-200mf` 103/103 nodes in **8.36 ms**, TFLite `mobilenet_v1` 34/34 ops in **4.67 ms**, `cpu_ep_fallback=disabled`).
 
 To view the web UI demo at `http://<BOARD_IP>:8088`:
 
@@ -367,6 +406,7 @@ If `/boot/dtb/ti/k3-am67a-beagley-ai.dtb` ever gets overwritten, restore your go
 | `fatal error: ../net/mac80211/ieee80211_i.h: No such file` | Out-of-tree `cc33xx` build missing internal `mac80211` headers | §5.3: include `net/mac80211/*.h` from `beagleboard/linux` (or use Release tarball) |
 | `echo stop > .../remoteprocN/state` times out after 5 s (`-16`) | K3 firmware stop requires mailbox handshake not implemented by bare-metal / some TI firmwares | `reboot` |
 | `onnxruntime ... Failed to open "/sys/class/drm/card1/device/vendor"` | Harmless warning (PowerVR lacks `vendor` sysfs file) | Ignore |
+| `Can't read local name on hci0: Input/output error (5)` | CC3300 is BLE-only; `hciconfig -a` queries BR/EDR local name | Normal; use `btmgmt info`, `btmgmt find -l`, or `bluetoothctl` |
 
 ---
 
@@ -382,13 +422,15 @@ If `/boot/dtb/ti/k3-am67a-beagley-ai.dtb` ever gets overwritten, restore your go
 
 ## 12. Appendix: Bare-Metal On-Chip MCU (`Cortex-R5F`)
 
-Only `remoteproc2` (`79000000.r5f`, MCU domain) is free (`remoteproc3` is the system Device Manager — never touch; `remoteproc4` runs `vision_apps`). Because BeagleY-AI exposes no MCU-domain UART/SPI/MCAN pins on the 40-pin header without soldering test points, we kept the MCU idle in daily use (~0.05 W saved) and preserved the 184-byte bare-metal shared-memory test (`15,289 iters/s`, `r5fw.elf` in Release `v1.1.0`) under [`mcu-r5f/`](mcu-r5f/). See [`mcu-r5f/README.md`](mcu-r5f/README.md) for the three mandatory K3 boot rules (BTCM at `0x0`, `.resource_table` section, `-marm`).
+Only `remoteproc2` (`79000000.r5f`, MCU domain) is free (`remoteproc3` is the system Device Manager — never touch; `remoteproc4` runs `vision_apps`). Because BeagleY-AI exposes no MCU-domain UART/SPI/MCAN pins on the 40-pin header without soldering test points, we kept the MCU idle in daily use (~0.05 W saved) and preserved the 184-byte bare-metal shared-memory test (`15,289 iters/s`, `r5fw.elf` in Release `v1.2.0`) under [`mcu-r5f/`](mcu-r5f/). See [`mcu-r5f/README.md`](mcu-r5f/README.md) for the three mandatory K3 boot rules (BTCM at `0x0`, `.resource_table` section, `-marm`).
 
 ---
 
 ## Repository Contents
 
-- [`scripts/install-cc33xx.sh`](scripts/install-cc33xx.sh) — Prebuilt CC33xx Wi-Fi module installer
+- [`scripts/install-kernel.sh`](scripts/install-kernel.sh) — Prebuilt `v1.2.0` full kernel + GPU `pvrsrvkm.ko` + BLE installer (creates `.orig` backups)
+- [`scripts/cc33xx-ble-enable.sh`](scripts/cc33xx-ble-enable.sh) — Boot-time helper to enable CC3300 BLE 5.4 via debugfs
+- [`scripts/install-cc33xx.sh`](scripts/install-cc33xx.sh) — Stock-kernel Wi-Fi-only `.ko` installer (`v1.1.0`)
 - [`scripts/patch-dtb-opp-thermal.py`](scripts/patch-dtb-opp-thermal.py) — Idempotent DTB patcher (e5010 IRQ + 1.4 GHz OPP + 80 °C thermal maps)
 - [`scripts/reapply-edgeai-dtb.sh`](scripts/reapply-edgeai-dtb.sh) — Restore golden DTB after accidental overwrite
 - [`scripts/setup-camera.sh`](scripts/setup-camera.sh) — IMX219 CSI0 media pipeline setup

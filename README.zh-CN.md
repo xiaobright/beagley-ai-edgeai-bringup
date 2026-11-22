@@ -2,18 +2,19 @@
 
 **English: [README.md](README.md)**
 
-这是一份给 **4GB 版 BeagleY-AI** 用的实战指南。目标很简单：**既保留像 Debian/Ubuntu 一样好用的 `apt` 软件生态，又把板子上的全套 TI 硬件加速全部跑起来**（双核 C7x AI 推理、PowerVR GPU、VPAC ISP 图像处理、H.264/H.265/JPEG 硬编、CPU 1.4GHz 调频 + 80°C 温控降频、板载 Wi-Fi 6）。
+这是一份给 **4GB 版 BeagleY-AI** 用的实战指南。目标很简单：**既保留像 Debian/Ubuntu 一样好用的 `apt` 软件生态，又把板子上的全套 TI 硬件加速和无线外设全部跑起来**（双核 C7x AI 推理、PowerVR GPU、VPAC ISP 图像处理、H.264/H.265/JPEG 硬编、CPU 1.4GHz 调频 + 80°C 温控降频、板载 Wi-Fi 6 + BLE 5.4 低功耗蓝牙、常见 USB/CAN/WireGuard/存储驱动）。
 
 - **测试平台**：BeagleY-AI（TI AM67A / J722S，4 GB LPDDR4）+ IMX219（CSI0）
-- **操作系统**：Armbian 26.08（Ubuntu 24.04 Noble minimal），内核 `6.12.49-vendor-k3-beagle`
+- **操作系统**：Armbian 26.08（Ubuntu 24.04 Noble minimal），自编增强版内核 `6.12.49-vendor-k3-beagle`
 - **AI 软件栈**：TI EdgeAI PSDK 11.02.01.03（`ti-edgeai` `v11.2.1-beagley.1` deb 包）
 - **实测日期**：2026-11-22（文内命令与实测数据均已在真实硬件上跑通）
 
 > **不想自己编译？直接用现成二进制包：**
-> 本仓库 [GitHub Release `v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0) 已经打好了三个最耗时的文件：
-> 1. `k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb` —— 修好全部硬件补丁的设备树（含 4GB EdgeAI 内存预留、CSI0 IMX219、e5010 中断修复、1.4GHz 调频、80°C 温控降频）
-> 2. `cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz` —— 编好的板载 Wi-Fi 驱动（附一键安装脚本 `install.sh`）
+> 本仓库 [GitHub Release `v1.2.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.2.0) 已经打好了全部耗时产物：
+> 1. `kernel-6.12.49-vendor-k3-beagle-full.tar.gz` —— 开启了板载 Wi-Fi 6 + BLE 5.4、常用 USB/CAN/WireGuard/exFAT/NTFS3 驱动的完整升级内核包（已自带重编好的 GPU `pvrsrvkm.ko` 与头文件同步文件，配合 [`scripts/install-kernel.sh`](scripts/install-kernel.sh) 一键安装并自动备份 `.orig`）
+> 2. `k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb` —— 修好全部硬件补丁的设备树（含 4GB EdgeAI 内存预留、CSI0 IMX219、e5010 中断修复、1.4GHz 调频、80°C 温控降频）
 > 3. `r5fw.elf` —— 附录用的片上 MCU 裸机测试固件
+> 4. `SHA256SUMS` —— 以上产物校验清单（如只需单独 Wi-Fi `.ko` 不想换内核，旧包仍在 [`v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0)）
 >
 > 按 **1 → 9** 节顺序做就能 10 分钟配齐；遇到报错直接跳到 **第 10 节「报错速查表」**。
 
@@ -24,12 +25,13 @@
 | 硬件能力 | 当前状态 | 实测结果 |
 |---|---|---|
 | 板载 Wi-Fi 6（TI CC3300） | ✅ 已打通 | 2.4GHz Wi-Fi 6（`HE-MCS 7`），接收协商速率 86 Mbps，开机自动连网 |
-| 板载蓝牙（CC3300 BLE） | ❌ 暂不可用 | 已编出 `btti_uart.ko`，但当前内核未开启 `CONFIG_BT_LE`（见第 5 节说明） |
+| 板载蓝牙（CC3300 BLE 5.4） | ✅ 已打通 | TI BLE 5.4（`version 13` / `hci0`），开机通过 `cc33xx-ble-enable.service` 自动唤醒，`btmgmt find -l` 可扫描设备并与 Wi-Fi 6 共存 |
+| 常用外设 / 工业 / 文件系统 | ✅ 已补齐 | 内核增开 UASP、CH341/PL2303 串口、USB 声卡、RNDIS、`uinput`、SocketCAN (`gs_usb`/`slcan`/`peak_usb`/`mcp251x`)、GPIO PPS、WireGuard、exFAT、NTFS3（KVM 保持关闭） |
 | CPU 调频 + 温控保护 | ✅ 已补齐 | 7 档频率（200M ~ 1.4GHz），80°C 自动触发被动降频，60s 满载 54.8°C |
-| GPU（PowerVR BXS-4-64） | ✅ 已打通 | OpenGL ES 3.2，`/dev/dri/card1` + `renderD128`（需重建 DKMS，见第 6 节） |
+| GPU（PowerVR BXS-4-64） | ✅ 已打通 | OpenGL ES 3.2，`/dev/dri/card1` + `renderD128`（`v1.2.0` 内核包已内置；原核需见第 6 节重编 DKMS） |
 | JPEG 硬编码（e5010） | ✅ 已打通 | 1080p 约 **39.7 fps**（已解决原厂 DTB 中断冲突） |
 | H.264 / HEVC 硬编（wave5） | ✅ 已打通 | H.264 1080p **38.6 fps** / 720p **79.3 fps**，HEVC 1080p **39.6 fps** |
-| C7x 双核 AI 推理（TIDL） | ✅ 已打通 | MobileNetV1 **4.62 ms**（34/34 算子）、RegNetX **7.29 ms**（103/103 节点），零 CPU 回落 |
+| C7x 双核 AI 推理（TIDL） | ✅ 已打通 | MobileNetV1 **4.67 ms**（34/34 算子）、RegNetX **8.36 ms**（103/103 节点），零 CPU 回落 |
 | IMX219 摄像头 + ISP | ✅ 已打通 | 1080p 30.09 fps；接 H.264 录像 29.7 fps |
 | 整机功耗（USB 功率计） | — | 空载 **5.4 W**，四核 1.4GHz 满载 **6.1 W** |
 
@@ -107,7 +109,7 @@ sudo ./install-j722s-release.sh --debs debs --kernel kernel --camera imx219 --re
 
 ```sh
 mkdir -p /root/dtb-good
-curl -fL "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.1.0/k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb" \
+curl -fL "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.2.0/k3-am67a-beagley-ai-edgeai-csi0-imx219-patched.dtb" \
   -o /root/dtb-good/k3-am67a-beagley-ai.dtb.golden
 
 # 校验 SHA256（必须是 10227dd8aa5bebafdd39d4f36a73e4ea3c49b0d6ec2208499300936e740fdc54）
@@ -156,17 +158,83 @@ ls -l /sys/class/thermal/thermal_zone0/cdev*
 
 ---
 
-## 5. 补全板载 Wi-Fi 6（TI CC3300）驱动 + 蓝牙现状
+## 5. 补全板载 Wi-Fi 6 + BLE 5.4 低功耗蓝牙（以及实用外设驱动）
 
-### 5.1 为什么板子默认没有 Wi-Fi？
+### 5.1 为什么默认只有骨架、没有无线和常用外设？
 
-板载的 Wi-Fi 芯片（TI CC3300 / BeagleMod BM3301）其实硬件已经正常枚举在 SDIO 总线上（`mmc2:0001:2`，`0x0097:0x4077`），设备树节点和 `/lib/firmware/ti-connectivity/cc33xx_*.bin` 固件也全都在。**唯一缺的是内核编译选项 `# CONFIG_CC33XX is not set`，Armbian 官方包压根没编这个驱动。**
+板载 TI CC3300（Wi-Fi 6 + BLE 5.4）芯片已经接在 SDIO (`mmc2:0001:2`) 和串口 (`serial0-0`) 上，`/lib/firmware/ti-connectivity/cc33xx_*.bin` 固件也全都在。但原版 `6.12.49-vendor-k3-beagle` 内核默认留了几个缺口：
+- 没编 `CONFIG_CC33XX` / `CONFIG_CC33XX_SDIO`（没有 Wi-Fi）；
+- 关闭了 `CONFIG_BT_LE`（经典蓝牙有，唯独没开低功耗蓝牙，而 CC3300 只支持 BLE 5.4）和 `CONFIG_CFG80211_DEBUGFS`（导致 `cc33xx` 的 `ble_enable` 唤醒入口不存在，`btti_uart` 永远等不到握手帧）；
+- 同时关闭了一批开发板高频用到的模块（UASP USB 3 硬盘盒加速、CH341/PL2303 串口、USB 声卡、手机 USB RNDIS、`uinput`、SocketCAN `gs_usb`/`slcan`/`peak_usb`/`mcp251x`、GPIO PPS、WireGuard、exFAT、NTFS3）。
 
-好消息是：这个内核**没开 `CONFIG_MODVERSIONS`，也没开模块签名校验**，并且自带完整头文件与 `Module.symvers`。所以我们**不用重编整个内核**（重编整核风险极大，容易把前面修好的东西全冲掉），只需要单独编出 `cc33xx.ko` 和 `cc33xx_sdio.ko` 两个内核模块放进去即可。
+我们提供了**两种装法**：
+- **方案 A（推荐，`v1.2.0` 完整升级内核包）**：一步把 Wi-Fi 6 + BLE 5.4 + 上述外设驱动全打开，且保持内核心脏版本号 `6.12.49-vendor-k3-beagle` 和你的 EdgeAI DTB 不变，包内已直接附带给新内核重编好的 PowerVR GPU 驱动 `pvrsrvkm.ko`，所有原系统文件都会先保留 `.orig` 备份；
+- **方案 B（只要 Wi-Fi、不想动原内核）**：仅单独安装 `v1.1.0` 的 `cc33xx.ko` + `cc33xx_sdio.ko` 模块（或自己在板子上 38 秒原生编译），不启用板载 BLE。
 
-### 5.2 方式 A（推荐）：直接安装 Release 预编译驱动
+---
 
-如果你用的是同一版内核（`uname -r` 输出为 `6.12.49-vendor-k3-beagle`），直接下载已经编好、实测通过的驱动包，10 秒装完：
+### 5.2 方案 A（完整方案，推荐）：一键安装 `v1.2.0` 增强内核（含 Wi-Fi 6 + BLE 5.4）
+
+> 如需自己在 PC/WSL 交叉编译同款内核，源码为 mainline `linux-6.12.49` + TI/BeagleBoard `6.12.49-ti-arm64-r56` 补丁集，构建工具需额外安装 `dwarves`（`pahole`）和 `zstd`。
+
+#### ① 下载、校验并安装内核包
+
+```sh
+TAG=v1.2.0
+BASE="https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/${TAG}"
+
+curl -fLO "${BASE}/kernel-6.12.49-vendor-k3-beagle-full.tar.gz"
+curl -fLO "${BASE}/SHA256SUMS"
+grep kernel-6.12.49-vendor-k3-beagle-full.tar.gz SHA256SUMS | sha256sum -c
+
+sudo bash scripts/install-kernel.sh kernel-6.12.49-vendor-k3-beagle-full.tar.gz
+sudo reboot
+```
+
+[`scripts/install-kernel.sh`](scripts/install-kernel.sh) 会自动完成以下动作（**绝不覆盖 `/boot/dtb/ti/k3-am67a-beagley-ai.dtb` 和 `/boot/uEnv.txt`**）：
+1. 保留完整回滚备份：`/boot/{Image,config-*,System.map-*}.orig`、`/lib/modules/6.12.49-vendor-k3-beagle.orig`、`/root/headers-sync-orig.tar.gz`、`/root/boot-orig/{initrd.img-*,uInitrd}`；
+2. 安装新内核 `/boot/Image`、`/lib/modules/6.12.49-vendor-k3-beagle`（含重建好的 `updates/dkms/pvrsrvkm.ko`），并同步内核头文件符号供后续 DKMS 使用；
+3. 更新 `uInitrd`（`update-initramfs -u -k 6.12.49-vendor-k3-beagle`）；
+4. 写入 `/etc/modules-load.d/cc33xx.conf`（开机加载 `cc33xx_sdio` 与 `btti_uart`）、安装 `bluez`（加 `--no-install-recommends`，不触发 hold 包），并启用 `cc33xx-ble-enable.service`。
+
+#### ② 重启后验证 Wi-Fi 6 与 BLE 5.4
+
+```sh
+# 1. 确认 Wi-Fi 接口已上线
+iw dev
+sudo ip link set wlan0 up
+sudo iw dev wlan0 scan | grep -E 'SSID:|signal:' | head -n 20
+
+# 2. 确认板载 TI BLE 5.4 控制器（hci0, version 13, manufacturer 13）
+sudo btmgmt info
+# 应看到：current settings: powered le secure-conn
+
+# 3. 扫描周边 BLE 设备（测试 10 秒）
+sudo timeout 10 btmgmt find -l
+```
+
+> **关于 BLE 的两个实际小坑：**
+> 1. **CC3300 只有 BLE（没有经典蓝牙 BR/EDR）**，所以跑 `hciconfig -a` 时末尾会报错 `Can't read local name on hci0: Input/output error (5)`，这是 `hciconfig` 去查询经典蓝牙名称导致的正常现象，以 `btmgmt info` / `btmgmt find -l` 或 `bluetoothctl` 结果为准；
+> 2. **开机唤醒脚本里不要直接调 `btmgmt`**：BlueZ 5.72 的 `btmgmt` 在无 TTY（`stdin=/dev/null`）的 `systemd` 服务中会永久阻塞，因此 [`scripts/cc33xx-ble-enable.sh`](scripts/cc33xx-ble-enable.sh) 仅负责向 `/sys/kernel/debug/ieee80211/phy*/cc33xx/ble_enable` 写入 `1`、解除可能存在的 rfkill 软阻塞并拉起 `hci0`，由 `bluetoothd`（默认 `AutoEnable=true`）接管上电。
+
+#### ③ 如需回滚到原始内核
+
+```sh
+sudo cp -f /boot/Image.orig /boot/Image
+sudo cp -f /boot/config-6.12.49-vendor-k3-beagle.orig /boot/config-6.12.49-vendor-k3-beagle
+sudo cp -f /boot/System.map-6.12.49-vendor-k3-beagle.orig /boot/System.map-6.12.49-vendor-k3-beagle
+sudo rm -rf /lib/modules/6.12.49-vendor-k3-beagle
+sudo mv /lib/modules/6.12.49-vendor-k3-beagle.orig /lib/modules/6.12.49-vendor-k3-beagle
+sudo cp -f /root/boot-orig/uInitrd /boot/uInitrd
+sudo systemctl disable --now cc33xx-ble-enable.service
+sync && sudo reboot
+```
+
+---
+
+### 5.3 方案 B（仅需 Wi-Fi、不动原内核）：安装或编译独立 `.ko`
+
+如果你希望保留原始 `/boot/Image` 不动（放弃板载 BLE），可直接下载 [`v1.1.0`](https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/tag/v1.1.0) 中的 `cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz`，或自行在板端 38 秒原生编译模块：
 
 ```sh
 curl -fLO "https://github.com/xiaobright/beagley-ai-edgeai-bringup/releases/download/v1.1.0/cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz"
@@ -174,41 +242,13 @@ tar -xzf cc33xx-drivers-6.12.49-vendor-k3-beagle.tar.gz
 sudo sh install.sh
 ```
 
-装完立刻检查网卡和周围信号：
-
-```sh
-iw dev
-sudo ip link set wlan0 up
-sudo iw dev wlan0 scan | grep -E 'SSID:|signal:' | head -n 20
-```
-
-### 5.3 方式 B：自己从源码编译（踩坑避雷版）
-
-> **⚠️ 千万别去 `kernel.org` 下载主线 `linux-6.12.49.tar.xz`！**
-> 主线 Linux 6.12 里**根本没有 `cc33xx` 驱动代码**。真正的源码在 BeagleBoard 官方内核仓库 [`beagleboard/linux`](https://github.com/beagleboard/linux) 的 **`v6.12.49-ti-arm64-r56`** 分支下。
->
-> 另外注意：`cc33xx/main.c` 引用了内核私有头文件 `#include "../net/mac80211/ieee80211_i.h"`，而板子上的 `linux-headers` 包没带这组头文件，所以取源码时必须把 `net/mac80211/*.h` 也一起拿下来放在同级 `../net/mac80211/` 目录里。
-
-在有网络的电脑或开发板上准备源码目录结构（全部从 `beagleboard/linux` 分支 `v6.12.49-ti-arm64-r56` 拉取）：
-
-```text
-src-drivers/
-├── cc33xx/           # 来自 drivers/net/wireless/ti/cc33xx/*
-└── net/
-    └── mac80211/     # 来自 net/mac80211/*.h（27 个头文件）
-```
-
-放到板子上直接原生编译（4 核 A53 实测 **38 秒**编完，与内核编译器版本完全一致）：
+自己从源码编模块时**不要从 `kernel.org` 下主线 6.12**（主线不含 `cc33xx`），应从 `beagleboard/linux` 分支 `v6.12.49-ti-arm64-r56` 拉取 `drivers/net/wireless/ti/cc33xx/` 和同级 `net/mac80211/*.h` 后在板端编译：
 
 ```sh
 cd src-drivers/cc33xx
 make -j4 -C /lib/modules/$(uname -r)/build M="$PWD" \
   CONFIG_CC33XX=m CONFIG_CC33XX_SDIO=m modules
-
-# 确认 vermagic 与当前内核一模一样
 modinfo cc33xx.ko cc33xx_sdio.ko | grep -E 'filename|vermagic|depends'
-# 期望 vermagic: 6.12.49-vendor-k3-beagle SMP preempt mod_unload aarch64
-
 sudo make -C /lib/modules/$(uname -r)/build M="$PWD" \
   CONFIG_CC33XX=m CONFIG_CC33XX_SDIO=m modules_install
 sudo depmod -a
@@ -247,24 +287,15 @@ sudo netplan apply
 2. **`route-metric: 200` 比有线网 `eth0` 的默认 `100` 大**：这样同时插着网线和连着 Wi-Fi 时，默认流量优先走千兆有线，不会把你的有线 SSH 连断；拔掉网线时自动切到 Wi-Fi；
 3. **`optional: true`**：带去没有这个热点的环境开机时，不会卡在等联网阶段耽误启动。
 
-实测效果：`wlan0` 连接 2.4GHz Wi-Fi 6 路由器，握手 `HE-MCS 7`（86.0 MBit/s RX），重启后自动拿 IP 上网，同时 `eth0` 保持原 IP 正常可用。注：CC3300 为单天线 2.4GHz 单流芯片，不支持 5GHz，实测可用吞吐约 20–40 Mbps 属于正常水平。
-
-### 5.5 关于板载蓝牙（为什么编译了但默认没启用）
-
-同一棵内核树 `drivers/bluetooth/` 下也有 TI 的蓝牙串口驱动 `btti_uart.c`（设备树里 `serial@2860000/bluetooth` 也已经写好了 `ti,cc33xx-bt`）。我们把 `btti_uart.ko` 也一并编译并放进了 Release 压缩包，但 **`install.sh` 刻意没有配置开机加载它**，实测发现它被当前内核配置两道锁死：
-
-1. **驱动层唤醒触发被关**：CC33xx 启动蓝牙需要主机通过 `debugfs` 发送 `BLE_ENABLE` 命令（`/sys/kernel/debug/ieee80211/phy0/cc33xx/ble_enable`），但当前内核关闭了 `CONFIG_CFG80211_DEBUGFS`，这个入口压根不存在，导致串口收不到芯片的蓝牙唤醒帧；
-2. **协议栈缺少低功耗蓝牙**：检查内核 `/boot/config-6.12.49-vendor-k3-beagle` 可知 `# CONFIG_BT_LE is not set`（只编译了经典蓝牙 BR/EDR），而 CC3300/BM3301 芯片**只支持 BLE 5.4**，没有经典蓝牙。
-
-结论：**只要不整核重编打开 `CONFIG_BT_LE` 和 `CONFIG_CFG80211_DEBUGFS`，板载蓝牙就无法在这套现成内核上工作；需要蓝牙最省事的办法是直接插一个 USB 蓝牙适配器。**
+实测效果：`wlan0` 连接 2.4GHz Wi-Fi 6 路由器，握手 `HE-MCS 7`（86.0 MBit/s RX），重启后自动拿 IP 上网，与 BLE 5.4 扫描共存且不影响 `eth0`。注：CC3300 为单天线 2.4GHz 单流芯片，不支持 5GHz，实测可用吞吐约 20–40 Mbps 属于正常水平。
 
 ---
 
 ## 6. 恢复 GPU（PowerVR BXS-4-64）
 
-装完 EdgeAI deb 包后，系统换上了 `6.12.49-vendor-k3-beagle` 内核，但 Armbian 自带的 GPU 驱动（`ti-img-rogue-driver`）是 DKMS 模块，安装器没有自动替新内核重编它。于是会出现一个**没有任何报错的坑**：`/dev/dri` 下只剩 `card0`，没有 `card1` 和 `renderD128`，GPU 静默失效。
+> 如果你按第 5 节方案 A 安装了 `v1.2.0` 完整内核包，包里已经自带编好的 `pvrsrvkm.ko`，直接跳过重编看下方验证命令即可。
 
-一条命令给当前内核重编装上就行：
+装完 EdgeAI deb 包后（或自己重编内核后），Armbian 自带的 GPU 驱动（`ti-img-rogue-driver`）需要为当前内核重编一次 DKMS，否则 `/dev/dri` 下只剩 `card0`、没有 `card1` 和 `renderD128`，GPU 会静默失效。
 
 ```sh
 VER=$(dkms status | grep ti-img-rogue-driver | head -1 | sed 's/.*ti-img-rogue-driver\/\([^,]*\),.*/\1/')
@@ -351,7 +382,7 @@ sudo systemctl disable --now ti-edgeai-dachshund-gatekeeper
 sudo validate-j722s-edgeai
 ```
 
-看到末尾输出 `TI EDGEAI RUNTIME VALIDATION: PASS` 即全部通过（实测：ONNX `regnetx-200mf` 103/103 节点全卸载到 C7x 平均 **7.29 ms**；TFLite `mobilenet_v1` 34/34 算子全卸载平均 **4.62 ms**）。
+看到末尾输出 `TI EDGEAI RUNTIME VALIDATION: PASS` 即全部通过（新内核重测：ONNX `regnetx-200mf` 103/103 节点全卸载到 C7x 平均 **8.36 ms**；TFLite `mobilenet_v1` 34/34 算子全卸载平均 **4.67 ms**）。
 
 如果想开浏览器看官方实时检测 Demo（`http://<板子IP>:8088`）：
 
@@ -420,6 +451,7 @@ apt-get -s upgrade | grep -E '^(Inst|Remv) (linux-|ti-img|ti-edgeai|armbian-|gst
 | `fatal error: ../net/mac80211/ieee80211_i.h: No such file` | 手动编 `cc33xx` 时只拷了驱动目录，漏了同级 `net/mac80211/*.h` | 第 5.3 节：补全 `net/mac80211/*.h`（或直接用 Release 成品包） |
 | `echo stop > .../remoteprocN/state` 卡 5 秒报 `-16` (`-EBUSY`) | K3 停止固件需要固件端配合应答 mailbox，自编裸机固件与部分 TI 固件没实现停止握手 | 无法热停核，直接 `reboot` |
 | `onnxruntime ... Failed to open "/sys/class/drm/card1/device/vendor"` | PowerVR sysfs 节点规范差异导致的无害警告 | 可安全忽略，不影响 TIDL 硬件推理 |
+| `Can't read local name on hci0: Input/output error (5)` | CC3300 是纯 BLE 芯片，没有经典蓝牙名，但 `hciconfig -a` 去读经典蓝牙名称 | 属正常提示，改用 `btmgmt info` / `btmgmt find -l` 或 `bluetoothctl` 验证 |
 
 ---
 
@@ -453,7 +485,9 @@ apt-get -s upgrade | grep -E '^(Inst|Remv) (linux-|ti-img|ti-edgeai|armbian-|gst
 
 ## 仓库目录导航
 
-- [`scripts/install-cc33xx.sh`](scripts/install-cc33xx.sh) —— 安装预编译 Wi-Fi 模块脚本
+- [`scripts/install-kernel.sh`](scripts/install-kernel.sh) —— 一键安装 `v1.2.0` 完整内核（含 BLE 5.4、常用外设驱动及重编好的 GPU 驱动，自动留 `.orig` 备份）
+- [`scripts/cc33xx-ble-enable.sh`](scripts/cc33xx-ble-enable.sh) —— 开机通过 debugfs 唤醒板载 CC3300 BLE 5.4 控制器脚本
+- [`scripts/install-cc33xx.sh`](scripts/install-cc33xx.sh) —— 仅在原内核上安装预编译 Wi-Fi 模块脚本（`v1.1.0`）
 - [`scripts/patch-dtb-opp-thermal.py`](scripts/patch-dtb-opp-thermal.py) —— 一键为原版 EdgeAI DTB 打上 e5010 + 1.4GHz OPP + 80°C 温控补丁
 - [`scripts/reapply-edgeai-dtb.sh`](scripts/reapply-edgeai-dtb.sh) —— 恢复黄金 DTB 脚本
 - [`scripts/setup-camera.sh`](scripts/setup-camera.sh) —— IMX219 CSI0 媒体管线初始化脚本
