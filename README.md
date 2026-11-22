@@ -725,6 +725,12 @@ So: driving real I/O from the R5F requires soldering to test points. Without
 that it is just "an extra 400 MHz core that can read and write DDR" — decide
 whether that is worth your time before starting.
 
+**Measured verdict (this project ended up disabling it)**: running it costs
+about **0.05 W** extra (USB power meter) while giving this board nothing it can
+drive and no workload that genuinely needs the core — so it was reverted after
+verification. The walkthrough is kept because the three boot constraints and the
+unstoppable-`stop` trap apply to other boards too.
+
 ### 14.4 Running your own bare-metal firmware (no TI SDK)
 
 All the difficulty is in three conventions.
@@ -809,6 +815,15 @@ dmesg | tail -3        # remoteproc remoteproc2: remote processor 79000000.r5f i
 > Build it on a PC or in WSL, not on the board. 184 bytes compile instantly on
 > an A53, but the moment the MCU+ SDK is involved you are looking at tens of
 > thousands of files.
+>
+> Measured clean build of the same firmware: **95 ms** on WSL (x86_64, 32 cores)
+> versus **229 ms** on the A53 (4 cores @ 1.2 GHz) — only 2.4x, because this is
+> all process-spawn overhead (`make` + `gcc` + `cc1` + `as` + `ld`, five forks).
+> The gap only matters once the file count is real.
+>
+> The toolchain costs **535 MB** (on-board gcc + binutils, or ~900 MB in WSL with
+> newlib) and can be removed afterwards without invalidating an ELF you already
+> built: `apt-get remove -y gcc-arm-none-eabi binutils-arm-none-eabi`.
 
 The firmware writes a heartbeat and a handshake word into DDR `0xa1100000` (the
 carveout the DT hands to it).

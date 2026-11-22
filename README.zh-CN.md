@@ -655,6 +655,10 @@ UART/SPI/MCAN 定义 pinctrl 组，引脚也没走到排针。全板 MCU 域引�
 所以：**想让 R5F 驱动物理 I/O 得飞线到测试点**。不飞线的话它就只是"一个能读写 DDR 的
 400MHz 附加核"，动手前先想清楚值不值。
 
+**实测结论（本项目最终选择关掉）**：跑起来多耗约 **0.05 W**（USB 功率计实测），
+而这块板上它没有任何可驱动的外设，也没有非它不可的活，所以验证完就回退了。
+下面保留全过程，是因为三个启动约定和 `stop` 掉不掉的坑对别的板子同样成立。
+
 ### 15.4 自己写裸机固件（不装 TI SDK）
 
 难点全在三个约定上。
@@ -733,6 +737,13 @@ dmesg | tail -3        # remoteproc remoteproc2: remote processor 79000000.r5f i
 
 > 在 PC 或 WSL 上编，别在板子上编。184 字节的东西 A53 也编得动，但一上 MCU+ SDK
 > 就是几万个文件。
+>
+> 实测同一份固件 clean build：WSL（x86_64 32 核）**95 ms**，A53（4 核 1.2GHz）**229 ms**，
+> 只差 2.4 倍，因为这点代码全是进程启动开销（`make`+`gcc`+`cc1`+`as`+`ld` 五次 fork）。
+> 真正拉开差距要上量。
+>
+> 工具链占 **535 MB**（板上）或 ~900 MB（WSL 带 newlib），用完可以卸掉，不影响已编好的 ELF：
+> `apt-get remove -y gcc-arm-none-eabi binutils-arm-none-eabi`。
 
 固件做的事：往 DDR `0xa1100000`（DT 分给它的那个 carveout）写心跳和握手字。
 
